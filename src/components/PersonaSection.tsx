@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { HugeiconsIcon } from '@hugeicons/react';
-import { 
-  Home01Icon, 
-  Briefcase01Icon, 
-  GlobalIcon, 
+import {
+  Home01Icon,
+  Briefcase01Icon,
+
   Book02Icon
 } from '@hugeicons/core-free-icons';
 import { GridPattern } from './ui/grid-pattern';
@@ -17,7 +17,7 @@ const personas = [
     icon: Home01Icon,
     description: 'We handle the market runs and grocery shopping so you can spend more quality time with your loved ones.',
     highlight: '98% on-time grocery delivery',
-    image: '/busy_family.png'
+    image: '/busy-families.jpg'
   },
   {
     id: 'professionals',
@@ -25,16 +25,9 @@ const personas = [
     icon: Briefcase01Icon,
     description: 'From document deliveries to office lunch runs, we act as your personal assistant on the go.',
     highlight: 'Save 10+ hours weekly',
-    image: '/professional.png'
+    image: '/professional.jpg'
   },
-  {
-    id: 'global',
-    title: 'Global Shoppers',
-    icon: GlobalIcon,
-    description: 'Want something from abroad? We procure and ship international items directly to your doorstep.',
-    highlight: 'Global shipping made easy',
-    image: '/global_shipping.png'
-  },
+
   {
     id: 'students',
     title: 'Students',
@@ -93,11 +86,10 @@ export const PersonaSection = () => {
               <button
                 key={persona.id}
                 onClick={() => setActiveTab(persona.id)}
-                className={`px-6 py-2.5 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${
-                  activeTab === persona.id 
-                    ? 'bg-white text-brand-primary shadow-sm' 
-                    : 'text-gray-500 hover:text-[#1A1C1E]'
-                }`}
+                className={`px-6 py-2.5 rounded-full text-sm font-bold transition-all flex items-center gap-2 ${activeTab === persona.id
+                  ? 'bg-white text-brand-primary shadow-sm'
+                  : 'text-gray-500 hover:text-[#1A1C1E]'
+                  }`}
               >
                 <HugeiconsIcon icon={persona.icon} size={18} strokeWidth={2} />
                 {persona.title}
@@ -118,14 +110,14 @@ export const PersonaSection = () => {
               className="absolute inset-0"
             >
               {/* Internal Card Background Image */}
-              <div 
+              <div
                 className="absolute inset-0 bg-cover bg-center transition-all duration-700"
-                style={{ 
+                style={{
                   backgroundImage: `url(${activePersona.image})`,
                 }}
               />
               <div className="absolute inset-0 bg-black/20" />
-              
+
               {/* Overlay Content */}
               <div className="absolute inset-0 flex items-end justify-end p-6 md:p-12">
                 <div className="max-w-sm bg-black/40 backdrop-blur-xl border border-white/10 p-8 rounded-[32px] text-white shadow-2xl mb-4 mr-4">
@@ -137,7 +129,7 @@ export const PersonaSection = () => {
                     <p className="text-white/90 text-sm md:text-base mb-6 leading-relaxed font-medium">
                       {activePersona.description}
                     </p>
-                    
+
                     <div className="flex items-baseline gap-3">
                       <span className="text-3xl md:text-4xl font-bold">92%</span>
                       <span className="text-xs md:text-sm text-white/60 font-medium uppercase tracking-wider">
