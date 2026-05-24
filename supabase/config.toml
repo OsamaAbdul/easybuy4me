@@ -1,0 +1,7 @@
+project_id = "jgksapsrcswsmylsccas"
+
+[functions.whatsapp-webhook]
+verify_jwt = false
+
+[functions.flutterwave-webhook]
+verify_jwt = false

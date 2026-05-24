@@ -3,6 +3,7 @@ import Lenis from 'lenis';
 import { Navbar } from './components/Navbar';
 import { Hero } from './components/Hero';
 import { Features } from './components/Features';
+import { OrderTracker } from './components/OrderTracker';
 import { PersonaSection } from './components/PersonaSection';
 import { GlobeStats } from './components/GlobeStats';
 import { Security } from './components/Security';
@@ -42,6 +43,7 @@ function App() {
       <main>
         <Hero />
         <Features />
+        <OrderTracker />
         <PersonaSection />
         <GlobeStats />
         <Security />

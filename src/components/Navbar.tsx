@@ -10,6 +10,7 @@ import {
 
 const navLinks = [
   { label: 'Features', href: '#features' },
+  { label: 'Track Order', href: '#tracker' },
   { label: 'Use Cases', href: '#personas' },
   { label: 'Security', href: '#security' },
   { label: 'FAQ', href: '#faq' }
