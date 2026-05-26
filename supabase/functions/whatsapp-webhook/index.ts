@@ -278,19 +278,111 @@ serve(async (req) => {
         const { data: foodItem } = await supabase.from('menu_items').select('name, price, vendor_id').eq('id', foodId).single();
         
         if (foodItem) {
-          await supabase.from('orders').insert({
-            customer_id: customerId,
-            vendor_id: foodItem.vendor_id,
-            status: 'pending_confirmation',
-            items: [{ name: foodItem.name, qty: 1, price: foodItem.price }],
-            subtotal: foodItem.price,
-            raw_text: `Selected ${foodItem.name}`
+          const { data: existingOrder } = await supabase
+            .from('orders')
+            .select('id, vendor_id, items, subtotal')
+            .eq('customer_id', customerId)
+            .eq('status', 'pending_confirmation')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          let subtotal = foodItem.price;
+
+          if (existingOrder) {
+            if (existingOrder.vendor_id === foodItem.vendor_id) {
+              const newItems = [...(existingOrder.items as any[] || []), { name: foodItem.name, qty: 1, price: foodItem.price }];
+              subtotal = existingOrder.subtotal + foodItem.price;
+              
+              await supabase.from('orders').update({
+                items: newItems,
+                subtotal: subtotal,
+                raw_text: `Added ${foodItem.name}`
+              }).eq('id', existingOrder.id);
+            } else {
+              await supabase.from('orders').delete().eq('id', existingOrder.id);
+              await supabase.from('orders').insert({
+                customer_id: customerId,
+                vendor_id: foodItem.vendor_id,
+                status: 'pending_confirmation',
+                items: [{ name: foodItem.name, qty: 1, price: foodItem.price }],
+                subtotal: foodItem.price,
+                raw_text: `Selected ${foodItem.name}`
+              });
+            }
+          } else {
+            await supabase.from('orders').insert({
+              customer_id: customerId,
+              vendor_id: foodItem.vendor_id,
+              status: 'pending_confirmation',
+              items: [{ name: foodItem.name, qty: 1, price: foodItem.price }],
+              subtotal: foodItem.price,
+              raw_text: `Selected ${foodItem.name}`
+            });
+          }
+
+          const replyMsg = `Added *${foodItem.name}* to your cart!\n\n🛒 Current Subtotal: *₦${subtotal}*\n\nWhat would you like to do next?`;
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text: replyMsg },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_add_more', title: 'Add More Items' } },
+                  { type: 'reply', reply: { id: 'btn_checkout', title: 'Checkout' } },
+                  { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
+                ]
+              }
+            }
           });
-          const replyMsg = `Great choice! You selected *${foodItem.name}* (₦${foodItem.price}).\n\nPlease reply with your delivery address or use the 📍 Location attachment so we can finalize your order.`;
-          await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
           await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
           return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
         }
+      } else if (interactiveId === 'btn_add_more') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('vendor_id')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_confirmation')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder && latestOrder.vendor_id) {
+          const { data: menuItems } = await supabase.from('menu_items').select('id, name, price, description').eq('vendor_id', latestOrder.vendor_id).eq('is_available', true).limit(10);
+          if (menuItems && menuItems.length > 0) {
+            const rows = menuItems.map((m) => ({ id: `food_${m.id}`, title: m.name.substring(0, 24), description: `₦${m.price} - ${(m.description || '')}`.substring(0, 72) }));
+            const replyMsg = `Please select another item to add:`;
+            await sendWhatsAppMessage({
+              messaging_product: 'whatsapp',
+              to: whatsappNumber,
+              type: 'interactive',
+              interactive: {
+                type: 'list',
+                body: { text: replyMsg },
+                action: {
+                  button: 'View Menu',
+                  sections: [{ title: 'Menu Items', rows: rows }]
+                }
+              }
+            });
+            await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+            return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+          }
+        }
+        
+        const replyMsg = `Sorry, couldn't load the menu. Please start a new order.`;
+        await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+
+      } else if (interactiveId === 'btn_checkout') {
+        const replyMsg = `Great! Please reply with your delivery address or use the 📍 Location attachment so we can finalize your order.`;
+        await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
       } else if (interactiveId === 'btn_confirm_order') {
         const { data: latestOrder } = await supabase
           .from('orders')
@@ -354,7 +446,7 @@ serve(async (req) => {
 
         if (latestOrder) {
           await supabase.from('orders').update({ status: 'preparing', payment_method: 'pay_on_delivery' }).eq('id', latestOrder.id);
-          const replyMsg = `Awesome! 🤝 You chose Pay on Delivery for ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          const replyMsg = `Awesome! 🤝 You chose Pay on Delivery for ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/tracker?code=${latestOrder.tracking_code}`;
           await sendWhatsAppMessage({
             messaging_product: 'whatsapp',
             to: whatsappNumber,
@@ -384,7 +476,7 @@ serve(async (req) => {
 
         if (latestOrder) {
           await supabase.from('orders').update({ status: 'preparing' }).eq('id', latestOrder.id);
-          const replyMsg = `Awesome! 💸 We are verifying your payment of ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          const replyMsg = `Awesome! 💸 We are verifying your payment of ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/tracker?code=${latestOrder.tracking_code}`;
           await sendWhatsAppMessage({
             messaging_product: 'whatsapp',
             to: whatsappNumber,
@@ -412,7 +504,7 @@ serve(async (req) => {
           .maybeSingle();
 
         if (latestOrder) {
-          const replyMsg = `🔴 *EasyBuy4Me: Live Tracker* 🟡\n\nHere is your latest order status:\n\n📦 Order Code: *${latestOrder.tracking_code}*\n⚡ Status: *${latestOrder.status.toUpperCase().replace('_', ' ')}*\n💰 Total: *₦${latestOrder.total_amount.toLocaleString()}*\n\nTrack live updates on our website: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          const replyMsg = `🔴 *EasyBuy4Me: Live Tracker* 🟡\n\nHere is your latest order status:\n\n📦 Order Code: *${latestOrder.tracking_code}*\n⚡ Status: *${latestOrder.status.toUpperCase().replace('_', ' ')}*\n💰 Total: *₦${latestOrder.total_amount.toLocaleString()}*\n\nTrack live updates on our website: https://easybuy4me.com/tracker?code=${latestOrder.tracking_code}`;
           await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
           await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
           return new Response(JSON.stringify({ status: 'success', intent: 'TRACK_ORDER' }), { status: 200, headers: corsHeaders });
@@ -531,18 +623,20 @@ JSON SCHEMA:
   "food_budget": "number or null",
   "delivery_address": "string or null",
   "reply_message": "string (the exact text to send the user)",
-  "next_action": "text" | "services_menu" | "buy_food_menu" | "request_location" | "confirm_order" | "payment_prompt",
+  "next_action": "text" | "services_menu" | "buy_food_menu" | "request_location" | "confirm_order" | "payment_prompt" | "add_more_items" | "checkout_cart",
   "update_name": "string or null"
 }
 
 CONVERSATION FLOW RULES:
 1. When a user first says hi or asks what you do, or when they select "Main Menu", set next_action="services_menu" and write a short welcoming reply_message.
 2. If the user selects "Errands & Food" or says they want an errand, DO NOT send a menu. Instead, set next_action="text" and prompt them to type exactly what they need us to buy or do.
-3. CRITICAL RULE: If the user MANUALLY types out a request for FOOD (e.g., "I want rice", "buy chicken"), YOU MUST set next_action="buy_food_menu" and tell them to select a restaurant. HOWEVER, if the chat history shows the user already used the interactive menu (e.g., the Assistant said "You selected..."), DO NOT use this rule. Proceed to Rule 5 if they provided a location.
-4. If they want a NON-FOOD errand, ask for the list of items and their budget. Once you have those, you MUST ask for their location: set next_action="request_location" and tell them: "Please send your delivery address or use the WhatsApp Location attachment so we can finalize your order."
-5. If the user provides their location (either for a non-food errand OR after selecting a food item from the menu), the delivery fee is a FLAT ₦500. IMPORTANT: The delivery fee CANNOT be bigger than their food_budget (if they have one). If ₦500 is greater than their food_budget, reduce the delivery fee to match their food_budget exactly. Then, calculate the total (food_budget + delivery fee + 500 service fee), summarize the complete order breakdown to the user, ask them to confirm if everything is correct, and set next_action="confirm_order".
-6. If the user confirms the order is correct (e.g., they say "Yes" or click "Confirm Order"), set next_action="payment_prompt" and tell them to make a payment to validate the order placement.
-7. If the user tells you their name or asks you to change/update their name, extract it and set update_name="Their Name", and politely confirm the update in reply_message.
+3. CRITICAL RULE: If the user MANUALLY types out a request for FOOD (e.g., "I want rice", "buy chicken"), YOU MUST set next_action="buy_food_menu" and tell them to select a restaurant. HOWEVER, if the chat history shows the user already used the interactive menu (e.g., the Assistant said "You selected..."), DO NOT use this rule. Proceed to Rule 6 if they provided a location.
+4. If the user tells you they want to add more items to their cart, set next_action="add_more_items". 
+5. If they tell you they are ready to checkout, set next_action="checkout_cart".
+6. If they want a NON-FOOD errand, ask for the list of items and their budget. Once you have those, you MUST ask for their location: set next_action="request_location" and tell them: "Please send your delivery address or use the WhatsApp Location attachment so we can finalize your order."
+7. If the user provides their location (either for a non-food errand OR after selecting a food item from the menu/cart), the delivery fee is a FLAT ₦500. IMPORTANT: The delivery fee CANNOT be bigger than their food_budget (if they have one). If ₦500 is greater than their food_budget, reduce the delivery fee to match their food_budget exactly. Then, calculate the total (food_budget + delivery fee + 500 service fee), summarize the complete order breakdown to the user, ask them to confirm if everything is correct, and set next_action="confirm_order".
+8. If the user confirms the order is correct (e.g., they say "Yes" or click "Confirm Order"), set next_action="payment_prompt" and tell them to make a payment to validate the order placement.
+9. If the user tells you their name or asks you to change/update their name, extract it and set update_name="Their Name", and politely confirm the update in reply_message.
 
 TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBuy4Me*.`;
 
@@ -611,6 +705,40 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
              }
            };
         }
+      } else if (next_action === 'add_more_items') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('vendor_id')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_confirmation')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder && latestOrder.vendor_id) {
+          const { data: menuItems } = await supabase.from('menu_items').select('id, name, price, description').eq('vendor_id', latestOrder.vendor_id).eq('is_available', true).limit(10);
+          if (menuItems && menuItems.length > 0) {
+            const rows = menuItems.map((m) => ({ id: `food_${m.id}`, title: m.name.substring(0, 24), description: `₦${m.price} - ${(m.description || '')}`.substring(0, 72) }));
+            waPayload.type = 'interactive';
+            waPayload.interactive = {
+              type: 'list',
+              body: { text: reply_message || 'Please select another item to add:' },
+              action: {
+                button: 'View Menu',
+                sections: [{ title: 'Menu Items', rows: rows }]
+              }
+            };
+          } else {
+             waPayload.type = 'text';
+             waPayload.text = { body: 'Sorry, couldn\'t load the menu. Please start a new order.' };
+          }
+        } else {
+           waPayload.type = 'text';
+           waPayload.text = { body: 'You don\'t have an active cart. Please select "Errands & Food" from the main menu.' };
+        }
+      } else if (next_action === 'checkout_cart') {
+         waPayload.type = 'text';
+         waPayload.text = { body: reply_message || 'Great! Please reply with your delivery address or use the 📍 Location attachment so we can finalize your order.' };
       } else if (next_action === 'confirm_order') {
         let deliveryFee = 500;
         if (food_budget && deliveryFee > food_budget) {
