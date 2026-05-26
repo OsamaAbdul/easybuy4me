@@ -48,7 +48,6 @@ serve(async (req) => {
       const message = val?.messages?.[0];
 
       if (!message) {
-        // Meta sends read/delivery statuses which we can ignore
         return new Response(JSON.stringify({ status: 'ignored' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -61,21 +60,31 @@ serve(async (req) => {
       const senderName = val?.contacts?.[0]?.profile?.name || 'WhatsApp User';
       const timestamp = message.timestamp;
 
-      // Extract text content
+      // Extract text content and location
       let messageBody = '';
+      let latitude = null;
+      let longitude = null;
+
       if (messageType === 'text') {
         messageBody = message.text?.body || '';
       } else if (messageType === 'interactive') {
         const interactive = message.interactive;
         if (interactive.type === 'button_reply') {
           messageBody = interactive.button_reply?.title || '';
+          if (interactive.button_reply?.id === 'register_now') {
+            messageBody = 'Register Now';
+          }
         } else if (interactive.type === 'list_reply') {
           messageBody = interactive.list_reply?.title || '';
         }
+      } else if (messageType === 'location') {
+        latitude = message.location?.latitude;
+        longitude = message.location?.longitude;
+        messageBody = `Location sent: ${latitude}, ${longitude}`;
       }
 
       if (!messageBody) {
-        return new Response(JSON.stringify({ status: 'no_text_content' }), {
+        return new Response(JSON.stringify({ status: 'no_text_or_location' }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -86,27 +95,91 @@ serve(async (req) => {
       const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
       const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-      // 1. Find or create customer
-      let customerId = '';
+      // 1. Find customer
       const { data: customer, error: customerErr } = await supabase
         .from('customers')
-        .select('id')
+        .select('id, full_name')
         .eq('whatsapp_number', whatsappNumber)
         .maybeSingle();
 
       if (customerErr) throw customerErr;
 
-      if (customer) {
-        customerId = customer.id;
-      } else {
-        const { data: newCustomer, error: createErr } = await supabase
-          .from('customers')
-          .insert({ whatsapp_number: whatsappNumber, full_name: senderName })
-          .select('id')
-          .single();
+      let customerId = '';
+      const whatsappAccessToken = Deno.env.get('WHATSAPP_ACCESS_TOKEN') || '';
+      const whatsappPhoneNumberId = Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') || '';
 
-        if (createErr) throw createErr;
-        customerId = newCustomer.id;
+      const sendWhatsAppMessage = async (payload: any) => {
+        const res = await fetch(`https://graph.facebook.com/v19.0/${whatsappPhoneNumberId}/messages`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${whatsappAccessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+           console.error('Failed to send WA message', await res.text());
+        }
+        return res;
+      };
+
+      // Registration Flow (if customer doesn't exist)
+      if (!customer) {
+        if (messageBody === 'Register Now') {
+          const { data: newCustomer, error: createErr } = await supabase
+            .from('customers')
+            .insert({ whatsapp_number: whatsappNumber, full_name: senderName })
+            .select('id')
+            .single();
+          if (createErr) throw createErr;
+          customerId = newCustomer.id;
+
+          // Customer registered, send Main Menu using interactive buttons
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              header: {
+                type: 'image',
+                image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+              },
+              body: { text: `Awesome ${senderName}! 🎉 You are registered. What do you need today?` },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_errands', title: 'Errands & Food' } },
+                  { type: 'reply', reply: { id: 'btn_wallet', title: 'My Wallet' } },
+                  { type: 'reply', reply: { id: 'btn_track', title: 'Track Order' } }
+                ]
+              }
+            }
+          });
+          return new Response(JSON.stringify({ status: 'registered' }), { status: 200, headers: corsHeaders });
+        } else {
+          // Ask to register
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              header: {
+                type: 'image',
+                image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+              },
+              body: { text: `Hey ${senderName}! 👋 Welcome to *EasyBuy4Me*. Happy International Women's Day! It looks like you don't have an account yet. Please register to continue.` },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'register_now', title: 'Register Now' } }
+                ]
+              }
+            }
+          });
+          return new Response(JSON.stringify({ status: 'unregistered' }), { status: 200, headers: corsHeaders });
+        }
+      } else {
+        customerId = customer.id;
       }
 
       // 2. Log inbound message
@@ -117,16 +190,40 @@ serve(async (req) => {
           direction: 'inbound',
           message_sid: messageId,
           message_body: messageBody,
-          metadata: { message_type: messageType, timestamp }
+          metadata: { message_type: messageType, timestamp, latitude, longitude }
         });
 
-      // 3. Get Chat History Context (past 5 messages for context)
+      // Distance & Price Calculation Function (Haversine)
+      // Base location: Ikeja, Lagos (6.5965, 3.3421) as an example
+      const BASE_LAT = 6.5965;
+      const BASE_LNG = 3.3421;
+      const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+        const R = 6371; // Radius of earth in km
+        const dLat = (lat2 - lat1) * (Math.PI / 180);
+        const dLon = (lon2 - lon1) * (Math.PI / 180);
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+          Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c; // km
+      };
+
+      let systemPromptInjection = '';
+      if (latitude && longitude) {
+         const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
+         const baseFee = 500;
+         const perKmFee = 150;
+         const calculatedDeliveryFee = Math.round(baseFee + (distance * perKmFee));
+         systemPromptInjection = `\n\n[SYSTEM NOTIFICATION]: The user just sent their location. Distance to hub is ${distance.toFixed(1)} km. The calculated delivery fee is ₦${calculatedDeliveryFee}. The AI must acknowledge the location, present the calculated delivery fee, and prompt the user to make payment (next_action="payment_prompt").`;
+      }
+
+      // 3. Get Chat History Context
       const { data: history } = await supabase
         .from('whatsapp_messages')
         .select('direction, message_body')
         .eq('customer_id', customerId)
         .order('created_at', { ascending: false })
-        .limit(6); // current message + 5 past ones
+        .limit(8); 
 
       let historyText = '';
       if (history) {
@@ -136,213 +233,124 @@ serve(async (req) => {
           .join('\n');
       }
 
-      // 4. Call Groq API (Llama 3.1 8B) for Intent Parsing
+      // 4. Call Groq API
       const groqApiKey = Deno.env.get('GROQ_API_KEY') || '';
-      if (!groqApiKey) {
-        throw new Error('GROQ_API_KEY is not defined in environment.');
-      }
+      if (!groqApiKey) throw new Error('GROQ_API_KEY is not defined.');
 
-      const systemPrompt = `You are the core AI intelligence engine of *EasyBuy4Me*, a premium logistics, errand, and VTU/subscription assistant. Your task is to process the incoming WhatsApp message from a customer and return a structured JSON response.
-
-DATABASE/SYSTEM CONTEXT:
-- Supported payment methods: 'flutterwave' (default online), 'opay_manual' (Opay transfer), 'bank_transfer' (general bank transfer).
-- Standard errand statuses: pending_payment, preparing, assigned, in_transit, delivered, cancelled.
-
-Respond ONLY with a valid JSON object matching the schema below. Do not wrap in markdown code blocks.
+      const systemPrompt = `You are the core AI intelligence engine of *EasyBuy4Me*, a premium logistics and errand assistant. Your task is to process incoming WhatsApp messages and return a JSON response dictating what to say and what interactive elements to show next.
 
 JSON SCHEMA:
 {
   "intent": "PLACE_ORDER" | "MAKE_PAYMENT" | "TRACK_ORDER" | "GENERAL_CONVERSATION" | "UNKNOWN",
-  "items": [
-    {
-      "name": "string (e.g. laundry, Jollof Rice, dynamic grocery item)",
-      "qty": number,
-      "spec": "string (e.g. extra chicken, wash and fold, green plantains)"
-    }
-  ],
+  "items": [{ "name": "string", "qty": number, "spec": "string" }],
   "vendor_name": "string or null",
-  "payment_method": "flutterwave" | "Opay" | "bank_transfer" | null,
+  "food_budget": "number or null",
   "delivery_address": "string or null",
-  "reply_message": "string"
+  "reply_message": "string (the exact text to send the user)",
+  "next_action": "text" | "services_menu" | "request_location" | "payment_prompt"
 }
 
-TONE & STYLE GUIDELINES (CRITICAL):
-1. **Bold Brand Name**: Always format the brand name as *EasyBuy4Me* (using asterisks for bold on WhatsApp). Never write it without asterisks.
-2. **Color Aesthetics**: Use 🔴 (red circle) and 🟡 (yellow/gold circle) emojis matching the brand colors to separate headers and highlight important options.
-3. **Keep it Natural**: The tone must be casual, super friendly, natural, and "easy as fuck". Do not sound robotic or use stuffy corporate-speak. Use expressions like "Hey!", "Got you covered!", "Let's get this sorted.", "Awesome!"
-4. **Structured Menu Navigation**: Limit the user to picking structured options.
-   - If they are greeting you or asking general things (GENERAL_CONVERSATION), introduce *EasyBuy4Me* by prefixing the website logo URL: "https://easybuy4me.vercel.app/easybuy4me-logo.jpg" at the absolute beginning of the message. Then present the MAIN MENU:
-     "https://easybuy4me.vercel.app/easybuy4me-logo.jpg
-     
-     🔴 *EasyBuy4Me* 🟡
-     
-     Hey ${senderName}! Let's make your life easy as fuck. 🚀 What are we doing today?
-     
-     Reply with a number to choose:
-     1️⃣ *Errands & Groceries* 🛍️ (Send a list, market runs, laundry)
-     2️⃣ *Order Food* 🍔 (Meals from your favorite restaurants)
-     3️⃣ *My Wallet* 💳 (Fund wallet, check balance)
-     4️⃣ *Data & Airtime (VTU)* 📱 (Super cheap data/airtime)
-     5️⃣ *EasyLunch* 🍱 (Daily/weekly lunch subscription)
-     6️⃣ *Track Order* 🚚 (Check status of a delivery)"
-   - If they select a number or ask for one of these categories, present the specific sub-options under it.
-     - For example, if they selected "My Wallet" (Option 3):
-       "🔴 *EasyBuy4Me: My Wallet* 🟡
-       
-       Manage your wallet balance and funds here:
-       
-       A. *Check Wallet Balance* 💰
-       B. *Fund My Wallet* 💵
-       
-       Reply with *A* or *B* to proceed!"
-     - For "Data & Airtime" (Option 4):
-       "🔴 *EasyBuy4Me: VTU Service* 🟡
-       
-       Super fast and cheap data/airtime:
-       
-       A. *Buy Data Bundle* 📶
-       B. *Purchase Airtime* 📞
-       
-       Reply with *A* or *B* to proceed!"
-     - For "EasyLunch" (Option 5):
-       "🔴 *EasyBuy4Me: EasyLunch* 🟡
-       
-       Hot, delicious lunch delivered to your home/office daily. Under NGN 4,900 subscription.
-       
-       Reply *A* to subscribe now!"
+CONVERSATION FLOW RULES:
+1. When a user first says hi or asks what you do, or when they select "Main Menu", set next_action="services_menu" and write a short welcoming reply_message.
+2. If they select "Errands & Food", ask them what specific errands or food they want.
+3. If they mention food, make sure to ask for their *budget for the food*.
+4. Once you have the list of items (and budget if food), you MUST ask for their location: set next_action="request_location" and tell them: "Please send your current location using the WhatsApp attachment (📍 Location) so we can calculate your delivery fee."
+5. If the system notification says they sent a location and gives a delivery fee, you must set next_action="payment_prompt", summarize their total order (budget + delivery fee), and tell them to pay to validate the order.
 
-RULES for "intent":
-- PLACE_ORDER: If customer is requesting items to purchase, food, groceries, custom errands (e.g., 'buy jollof rice', 'help me pick up my laundry', 'need 5 tomatoes from the market').
-- MAKE_PAYMENT: If customer confirms payment, asks for payment details, or requests payment options (e.g., 'send bank details', 'can I pay with Opay', 'I have made the transfer').
-- TRACK_ORDER: If customer is asking for the progress of an order or where the rider is.
-- GENERAL_CONVERSATION: Normal greetings (hi, hello, thanks, etc.) or when navigating the menus.
-
-RULES for "reply_message":
-- If intent is PLACE_ORDER: Summarize items clearly and ask for delivery address: "Hey! I've noted down your errand request:\n🛍️ *Items*:\n[list items here with qty/spec]\n\nPlease reply with your *delivery address* next so we can get this sorted!"
-- If intent is MAKE_PAYMENT: "Awesome! You can pay seamlessly via card or bank transfer. If you prefer manual transfer, here are our OPay details:\n\n🔴 *OPay Account*:\nBank: *OPay*\nAccount Number: *8145096342*\nAccount Name: *EasyBuy4Me*\n\nLet me know once you've made the transfer!"
-- If intent is TRACK_ORDER: "Searching for your order status. Hold on one sec, or reply with your Order Tracking Code (e.g., EBY-123456) if you have it handy."`;
+TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBuy4Me*.${systemPromptInjection}`;
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${groqApiKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Authorization': `Bearer ${groqApiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'llama-3.1-8b-instant',
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Chat History Context:\n${historyText}\n\nNew Incoming Message: "${messageBody}"` },
+            { role: 'user', content: `Chat History:\n${historyText}\n\nNew Incoming Message: "${messageBody}"` },
           ],
           temperature: 0.2,
         }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Groq API returned error: ${response.status} - ${errorText}`);
-      }
-
+      if (!response.ok) throw new Error(`Groq API returned error: ${response.status}`);
       const groqData = await response.json();
-      const aiResponseContent = groqData.choices?.[0]?.message?.content;
-      console.log('Groq completion response:', aiResponseContent);
+      const parsedResult = JSON.parse(groqData.choices?.[0]?.message?.content || '{}');
+      console.log('Parsed LLM Result:', parsedResult);
 
-      const parsedResult = JSON.parse(aiResponseContent);
-      const { intent, items, vendor_name, payment_method, delivery_address, reply_message } = parsedResult;
+      const { intent, items, food_budget, reply_message, next_action } = parsedResult;
 
-      // 5. Handle Intent Operations
-      if (intent === 'PLACE_ORDER' && items && items.length > 0) {
-        const subtotal = 0.00;
-        const deliveryFee = 1500.00; // Base delivery fee in NGN
-        const serviceFee = 500.00;
-        const totalAmount = subtotal + deliveryFee + serviceFee;
+      // 5. Construct final WhatsApp Message Payload based on next_action
+      let waPayload: any = {
+        messaging_product: 'whatsapp',
+        to: whatsappNumber,
+      };
 
-        // Check if there is a vendor name, search or insert it if not
-        let vendorId = null;
-        if (vendor_name) {
-          const { data: vendor } = await supabase
-            .from('vendors')
-            .select('id')
-            .eq('name', vendor_name)
-            .maybeSingle();
-          if (vendor) {
-            vendorId = vendor.id;
-          } else {
-            const { data: newVendor } = await supabase
-              .from('vendors')
-              .insert({ name: vendor_name, category: 'other' })
-              .select('id')
-              .single();
-            if (newVendor) vendorId = newVendor.id;
+      if (next_action === 'services_menu') {
+        waPayload.type = 'interactive';
+        waPayload.interactive = {
+          type: 'button',
+          header: {
+            type: 'image',
+            image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+          },
+          body: { text: reply_message || 'What do you need today?' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'btn_errands', title: 'Errands & Food' } },
+              { type: 'reply', reply: { id: 'btn_wallet', title: 'My Wallet' } },
+              { type: 'reply', reply: { id: 'btn_track', title: 'Track Order' } }
+            ]
           }
-        }
-
-        // Insert new order
-        const { error: orderErr } = await supabase
-          .from('orders')
-          .insert({
-            customer_id: customerId,
-            vendor_id: vendorId,
-            status: 'pending_payment',
-            items: items,
-            raw_text: messageBody,
-            errand_description: reply_message,
-            subtotal,
-            delivery_fee: deliveryFee,
-            service_fee: serviceFee,
-            total_amount: totalAmount,
-            payment_method: payment_method || 'flutterwave'
-          });
-
-        if (orderErr) {
-          console.error('Error creating order in Supabase:', orderErr);
-        }
-      } else if (intent === 'TRACK_ORDER') {
-        const { data: latestOrder } = await supabase
-          .from('orders')
-          .select('tracking_code, status, total_amount')
-          .eq('customer_id', customerId)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (latestOrder) {
-          parsedResult.reply_message = `🔴 *EasyBuy4Me: Live Tracker* 🟡\n\nHere is your latest order status:\n\n📦 Order Code: *${latestOrder.tracking_code}*\n⚡ Status: *${latestOrder.status.toUpperCase().replace('_', ' ')}*\n💰 Total: *₦${latestOrder.total_amount.toLocaleString()}*\n\nTrack live updates on our website: https://easybuy4me.vercel.app/#tracker?code=${latestOrder.tracking_code}`;
-        } else {
-          parsedResult.reply_message = `🔴 *EasyBuy4Me: Live Tracker* 🟡\n\nI couldn't find any active orders under your number. Let me know what errand you want me to run today! 🚀`;
-        }
+        };
+      } else if (next_action === 'payment_prompt') {
+         // Create the order in DB if we have items
+         if (items && items.length > 0) {
+            let deliveryFee = 0;
+            if (latitude && longitude) {
+               const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
+               deliveryFee = Math.round(500 + (distance * 150));
+            } else {
+               deliveryFee = 1500; // fallback
+            }
+            const totalAmount = (food_budget || 0) + deliveryFee + 500; // 500 service fee
+            
+            await supabase.from('orders').insert({
+              customer_id: customerId,
+              status: 'pending_payment',
+              items: items,
+              raw_text: messageBody,
+              subtotal: food_budget || 0,
+              delivery_fee: deliveryFee,
+              service_fee: 500,
+              total_amount: totalAmount,
+              payment_method: 'bank_transfer'
+            });
+         }
+         
+         waPayload.type = 'interactive';
+         waPayload.interactive = {
+           type: 'button',
+           body: { text: reply_message || 'Please make a payment to validate your order.' },
+           action: {
+             buttons: [
+               { type: 'reply', reply: { id: 'btn_paid', title: 'I Have Paid' } },
+               { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
+             ]
+           }
+         };
+      } else {
+         // fallback for text and request_location (which is just text asking to use the attachment)
+         waPayload.type = 'text';
+         waPayload.text = { body: reply_message };
       }
 
-      // 6. Send Response to WhatsApp Cloud API
-      const whatsappAccessToken = Deno.env.get('WHATSAPP_ACCESS_TOKEN') || '';
-      const whatsappPhoneNumberId = Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') || '';
-
-      const whatsappRes = await fetch(
-        `https://graph.facebook.com/v19.0/${whatsappPhoneNumberId}/messages`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${whatsappAccessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            to: whatsappNumber,
-            type: 'text',
-            text: { body: parsedResult.reply_message },
-          }),
-        }
-      );
-
+      // Send to WhatsApp
+      const waResponse = await sendWhatsAppMessage(waPayload);
       let whatsappMsgSid = '';
-      if (whatsappRes.ok) {
-        const whatsappResData = await whatsappRes.json();
-        whatsappMsgSid = whatsappResData.messages?.[0]?.id || '';
-        console.log('WhatsApp reply sent successfully! Message SID:', whatsappMsgSid);
-      } else {
-        const errText = await whatsappRes.text();
-        console.error('Failed to send WhatsApp message. Error:', errText);
+      if (waResponse.ok) {
+        const waData = await waResponse.json();
+        whatsappMsgSid = waData.messages?.[0]?.id || '';
       }
 
       // 7. Log outbound message
@@ -352,10 +360,10 @@ RULES for "reply_message":
           customer_id: customerId,
           direction: 'outbound',
           message_sid: whatsappMsgSid,
-          message_body: parsedResult.reply_message,
+          message_body: reply_message,
         });
 
-      return new Response(JSON.stringify({ status: 'success', intent: parsedResult.intent }), {
+      return new Response(JSON.stringify({ status: 'success', intent }), {
         status: 200,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });

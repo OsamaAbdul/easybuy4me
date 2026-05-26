@@ -136,7 +136,19 @@ CREATE TABLE IF NOT EXISTS payments (
     transaction_id TEXT, -- Flutterwave internal ID
     amount NUMERIC(12, 2) NOT NULL,
     currency TEXT NOT NULL DEFAULT 'NGN',
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'successful', 'failed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', '
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    ', 'failed')),
     payment_gateway TEXT NOT NULL DEFAULT 'flutterwave',
     raw_payload JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
