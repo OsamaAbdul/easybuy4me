@@ -123,23 +123,20 @@ export const OrderTracker = () => {
     };
   }, [order?.dispatcher_id]);
 
-  const handleTrack = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!trackingCode.trim()) return;
-
+  const fetchOrder = async (code: string) => {
     setLoading(true);
     setError(null);
     setOrder(null);
     setDispatcher(null);
 
     try {
-      const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(trackingCode.trim());
+      const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(code.trim());
       const queryField = isUuid ? 'id' : 'tracking_code';
 
       const { data, error } = await supabase
         .from('orders')
         .select('*')
-        .eq(queryField, trackingCode.trim().toUpperCase())
+        .eq(queryField, code.trim().toUpperCase())
         .single();
 
       if (error) {
@@ -154,6 +151,27 @@ export const OrderTracker = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    let code = urlParams.get('code');
+    if (!code && hash.includes('?code=')) {
+      code = hash.split('?code=')[1]?.split('&')[0];
+    }
+
+    if (code) {
+      setTrackingCode(code);
+      fetchOrder(code);
+    }
+  }, []);
+
+  const handleTrack = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!trackingCode.trim()) return;
+    await fetchOrder(trackingCode);
   };
 
   const getStepStatus = (step: number) => {
