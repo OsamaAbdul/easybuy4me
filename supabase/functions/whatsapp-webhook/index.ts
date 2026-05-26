@@ -118,7 +118,7 @@ serve(async (req) => {
           body: JSON.stringify(payload),
         });
         if (!res.ok) {
-           console.error('Failed to send WA message', await res.text());
+          console.error('Failed to send WA message', await res.text());
         }
         return res;
       };
@@ -143,7 +143,7 @@ serve(async (req) => {
               type: 'button',
               header: {
                 type: 'image',
-                image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+                image: { link: 'https://easybuy4me.vercel.app/easybuy4me-logo.jpg' }
               },
               body: { text: `Awesome ${senderName}! 🎉 You are registered. What do you need today?` },
               action: {
@@ -166,7 +166,7 @@ serve(async (req) => {
               type: 'button',
               header: {
                 type: 'image',
-                image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+                image: { link: 'https://easybuy4me.vercel.app/easybuy4me-logo.jpg' }
               },
               body: { text: `Hey ${senderName}! 👋 Welcome to *EasyBuy4Me*. Happy International Women's Day! It looks like you don't have an account yet. Please register to continue.` },
               action: {
@@ -210,11 +210,11 @@ serve(async (req) => {
 
       let systemPromptInjection = '';
       if (latitude && longitude) {
-         const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
-         const baseFee = 500;
-         const perKmFee = 150;
-         const calculatedDeliveryFee = Math.round(baseFee + (distance * perKmFee));
-         systemPromptInjection = `\n\n[SYSTEM NOTIFICATION]: The user just sent their location. Distance to hub is ${distance.toFixed(1)} km. The calculated delivery fee is ₦${calculatedDeliveryFee}. The AI must acknowledge the location, present the calculated delivery fee, and prompt the user to make payment (next_action="payment_prompt").`;
+        const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
+        const baseFee = 500;
+        const perKmFee = 150;
+        const calculatedDeliveryFee = Math.round(baseFee + (distance * perKmFee));
+        systemPromptInjection = `\n\n[SYSTEM NOTIFICATION]: The user just sent their location. Distance to hub is ${distance.toFixed(1)} km. The calculated delivery fee is ₦${calculatedDeliveryFee}. The AI must acknowledge the location, present the calculated delivery fee, and prompt the user to make payment (next_action="payment_prompt").`;
       }
 
       // 3. Get Chat History Context
@@ -223,7 +223,7 @@ serve(async (req) => {
         .select('direction, message_body')
         .eq('customer_id', customerId)
         .order('created_at', { ascending: false })
-        .limit(8); 
+        .limit(8);
 
       let historyText = '';
       if (history) {
@@ -292,7 +292,7 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
           type: 'button',
           header: {
             type: 'image',
-            image: { link: 'https://easybuy4me.vercel.app/women-day-banner.png' }
+            image: { link: 'https://easybuy4me.com/easybuy4me-logo.jpg' }
           },
           body: { text: reply_message || 'What do you need today?' },
           action: {
@@ -304,45 +304,45 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
           }
         };
       } else if (next_action === 'payment_prompt') {
-         // Create the order in DB if we have items
-         if (items && items.length > 0) {
-            let deliveryFee = 0;
-            if (latitude && longitude) {
-               const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
-               deliveryFee = Math.round(500 + (distance * 150));
-            } else {
-               deliveryFee = 1500; // fallback
-            }
-            const totalAmount = (food_budget || 0) + deliveryFee + 500; // 500 service fee
-            
-            await supabase.from('orders').insert({
-              customer_id: customerId,
-              status: 'pending_payment',
-              items: items,
-              raw_text: messageBody,
-              subtotal: food_budget || 0,
-              delivery_fee: deliveryFee,
-              service_fee: 500,
-              total_amount: totalAmount,
-              payment_method: 'bank_transfer'
-            });
-         }
-         
-         waPayload.type = 'interactive';
-         waPayload.interactive = {
-           type: 'button',
-           body: { text: reply_message || 'Please make a payment to validate your order.' },
-           action: {
-             buttons: [
-               { type: 'reply', reply: { id: 'btn_paid', title: 'I Have Paid' } },
-               { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
-             ]
-           }
-         };
+        // Create the order in DB if we have items
+        if (items && items.length > 0) {
+          let deliveryFee = 0;
+          if (latitude && longitude) {
+            const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
+            deliveryFee = Math.round(500 + (distance * 150));
+          } else {
+            deliveryFee = 1500; // fallback
+          }
+          const totalAmount = (food_budget || 0) + deliveryFee + 500; // 500 service fee
+
+          await supabase.from('orders').insert({
+            customer_id: customerId,
+            status: 'pending_payment',
+            items: items,
+            raw_text: messageBody,
+            subtotal: food_budget || 0,
+            delivery_fee: deliveryFee,
+            service_fee: 500,
+            total_amount: totalAmount,
+            payment_method: 'bank_transfer'
+          });
+        }
+
+        waPayload.type = 'interactive';
+        waPayload.interactive = {
+          type: 'button',
+          body: { text: reply_message || 'Please make a payment to validate your order.' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'btn_paid', title: 'I Have Paid' } },
+              { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
+            ]
+          }
+        };
       } else {
-         // fallback for text and request_location (which is just text asking to use the attachment)
-         waPayload.type = 'text';
-         waPayload.text = { body: reply_message };
+        // fallback for text and request_location (which is just text asking to use the attachment)
+        waPayload.type = 'text';
+        waPayload.text = { body: reply_message };
       }
 
       // Send to WhatsApp
