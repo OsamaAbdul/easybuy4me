@@ -143,7 +143,7 @@ serve(async (req) => {
               type: 'button',
               header: {
                 type: 'image',
-                image: { link: 'https://easybuy4me.vercel.app/easybuy4me-logo.jpg' }
+                image: { link: 'https://easybuy4me.com/easybuy4me-logo.jpg' }
               },
               body: { text: `Awesome ${senderName}! 🎉 You are registered. What do you need today?` },
               action: {
@@ -166,9 +166,9 @@ serve(async (req) => {
               type: 'button',
               header: {
                 type: 'image',
-                image: { link: 'https://easybuy4me.vercel.app/easybuy4me-logo.jpg' }
+                image: { link: 'https://easybuy4me.com/easybuy4me-logo.jpg' }
               },
-              body: { text: `Hey ${senderName}! 👋 Welcome to *EasyBuy4Me*. Happy International Women's Day! It looks like you don't have an account yet. Please register to continue.` },
+              body: { text: `Hey ${senderName}! 👋 Welcome to *EasyBuy4Me*.  It looks like you don't have an account yet. Please register to continue.` },
               action: {
                 buttons: [
                   { type: 'reply', reply: { id: 'register_now', title: 'Register Now' } }
@@ -193,28 +193,305 @@ serve(async (req) => {
           metadata: { message_type: messageType, timestamp, latitude, longitude }
         });
 
-      // Distance & Price Calculation Function (Haversine)
-      // Base location: Ikeja, Lagos (6.5965, 3.3421) as an example
-      const BASE_LAT = 6.5965;
-      const BASE_LNG = 3.3421;
-      const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-        const R = 6371; // Radius of earth in km
-        const dLat = (lat2 - lat1) * (Math.PI / 180);
-        const dLon = (lon2 - lon1) * (Math.PI / 180);
-        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-          Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-          Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        return R * c; // km
-      };
+      // Intercept Explicit Button Actions
+      const interactiveId = messageType === 'interactive' ? (message.interactive?.button_reply?.id || message.interactive?.list_reply?.id) : null;
+      
+      if (interactiveId === 'btn_errands') {
+        const replyMsg = `Would you like us to run an errand for you, or do you want to buy food from a vendor?`;
+        await sendWhatsAppMessage({
+          messaging_product: 'whatsapp',
+          to: whatsappNumber,
+          type: 'interactive',
+          interactive: {
+            type: 'button',
+            body: { text: replyMsg },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'btn_run_errand', title: 'Run an Errand' } },
+                { type: 'reply', reply: { id: 'btn_buy_food', title: 'Buy Food' } }
+              ]
+            }
+          }
+        });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+      } else if (interactiveId === 'btn_run_errand') {
+        const replyMsg = `Great! Please type exactly what errand you need us to run for you.`;
+        await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+      } else if (interactiveId === 'btn_buy_food') {
+        const { data: vendors } = await supabase.from('vendors').select('id, name, address').eq('category', 'restaurant').eq('is_active', true).limit(10);
+        
+        if (!vendors || vendors.length === 0) {
+           const replyMsg = `Sorry, no food vendors are available at the moment.`;
+           await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+           return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
 
-      let systemPromptInjection = '';
+        const rows = vendors.map((v) => ({ id: `vendor_${v.id}`, title: v.name.substring(0, 24), description: (v.address || '').substring(0, 72) }));
+        const replyMsg = `Please select a vendor from the list below:`;
+        await sendWhatsAppMessage({
+          messaging_product: 'whatsapp',
+          to: whatsappNumber,
+          type: 'interactive',
+          interactive: {
+            type: 'list',
+            body: { text: replyMsg },
+            action: {
+              button: 'View Vendors',
+              sections: [{ title: 'Restaurants', rows: rows }]
+            }
+          }
+        });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+      } else if (interactiveId?.startsWith('vendor_')) {
+        const vendorId = interactiveId.replace('vendor_', '');
+        const { data: menuItems } = await supabase.from('menu_items').select('id, name, price, description').eq('vendor_id', vendorId).eq('is_available', true).limit(10);
+        
+        if (!menuItems || menuItems.length === 0) {
+           const replyMsg = `Sorry, this vendor currently has no items available.`;
+           await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+           return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
+
+        const rows = menuItems.map((m) => ({ id: `food_${m.id}`, title: m.name.substring(0, 24), description: `₦${m.price} - ${(m.description || '')}`.substring(0, 72) }));
+        const replyMsg = `Please select a food item to buy:`;
+        await sendWhatsAppMessage({
+          messaging_product: 'whatsapp',
+          to: whatsappNumber,
+          type: 'interactive',
+          interactive: {
+            type: 'list',
+            body: { text: replyMsg },
+            action: {
+              button: 'View Menu',
+              sections: [{ title: 'Menu Items', rows: rows }]
+            }
+          }
+        });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+      } else if (interactiveId?.startsWith('food_')) {
+        const foodId = interactiveId.replace('food_', '');
+        const { data: foodItem } = await supabase.from('menu_items').select('name, price, vendor_id').eq('id', foodId).single();
+        
+        if (foodItem) {
+          await supabase.from('orders').insert({
+            customer_id: customerId,
+            vendor_id: foodItem.vendor_id,
+            status: 'pending_confirmation',
+            items: [{ name: foodItem.name, qty: 1, price: foodItem.price }],
+            subtotal: foodItem.price,
+            raw_text: `Selected ${foodItem.name}`
+          });
+          const replyMsg = `Great choice! You selected *${foodItem.name}* (₦${foodItem.price}).\n\nPlease reply with your delivery address or use the 📍 Location attachment so we can finalize your order.`;
+          await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
+      } else if (interactiveId === 'btn_confirm_order') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id, total_amount')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_confirmation')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          await supabase.from('orders').update({ status: 'pending_payment' }).eq('id', latestOrder.id);
+          const replyMsg = `Awesome! Please choose your payment method for your total of ₦${latestOrder.total_amount} to validate your order.`;
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text: replyMsg },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_bank_transfer', title: 'Bank Transfer' } },
+                  { type: 'reply', reply: { id: 'btn_pay_on_delivery', title: 'Pay on Delivery' } },
+                  { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
+                ]
+              }
+            }
+          });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
+      } else if (interactiveId === 'btn_bank_transfer') {
+        const replyMsg = `Please transfer to the following account:\n\n🏦 Bank: *GTBank*\n🔢 Account: *0123456789*\n👤 Name: *EasyBuy4Me*\n\nOnce done, click "I Have Paid" below.`;
+        await sendWhatsAppMessage({
+          messaging_product: 'whatsapp',
+          to: whatsappNumber,
+          type: 'interactive',
+          interactive: {
+            type: 'button',
+            body: { text: replyMsg },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'btn_paid', title: 'I Have Paid' } },
+                { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
+              ]
+            }
+          }
+        });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+      } else if (interactiveId === 'btn_pay_on_delivery') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id, tracking_code, total_amount')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_payment')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          await supabase.from('orders').update({ status: 'preparing', payment_method: 'pay_on_delivery' }).eq('id', latestOrder.id);
+          const replyMsg = `Awesome! 🤝 You chose Pay on Delivery for ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text: replyMsg },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_track', title: 'Track Order' } }
+                ]
+              }
+            }
+          });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
+      } else if (interactiveId === 'btn_paid') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id, tracking_code, total_amount')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_payment')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          await supabase.from('orders').update({ status: 'preparing' }).eq('id', latestOrder.id);
+          const replyMsg = `Awesome! 💸 We are verifying your payment of ₦${latestOrder.total_amount}. Your order is now being processed.\n\n🚚 Your Tracking Code is: *${latestOrder.tracking_code}*\n\nTrack live updates here: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text: replyMsg },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_track', title: 'Track Order' } }
+                ]
+              }
+            }
+          });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success', intent: 'MAKE_PAYMENT' }), { status: 200, headers: corsHeaders });
+        }
+      } else if (interactiveId === 'btn_track') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('tracking_code, status, total_amount')
+          .eq('customer_id', customerId)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          const replyMsg = `🔴 *EasyBuy4Me: Live Tracker* 🟡\n\nHere is your latest order status:\n\n📦 Order Code: *${latestOrder.tracking_code}*\n⚡ Status: *${latestOrder.status.toUpperCase().replace('_', ' ')}*\n💰 Total: *₦${latestOrder.total_amount.toLocaleString()}*\n\nTrack live updates on our website: https://easybuy4me.com/#tracker?code=${latestOrder.tracking_code}`;
+          await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success', intent: 'TRACK_ORDER' }), { status: 200, headers: corsHeaders });
+        } else {
+          const replyMsg = `You don't have any recent orders to track right now!`;
+          await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success', intent: 'TRACK_ORDER' }), { status: 200, headers: corsHeaders });
+        }
+      } else if (interactiveId === 'btn_cancel') {
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id')
+          .eq('customer_id', customerId)
+          .in('status', ['pending_payment', 'pending_confirmation'])
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          await supabase.from('orders').update({ status: 'cancelled' }).eq('id', latestOrder.id);
+        }
+        const replyMsg = `No problem! Your order has been cancelled. Let us know if you need anything else from the Main Menu.`;
+        await sendWhatsAppMessage({ messaging_product: 'whatsapp', to: whatsappNumber, type: 'text', text: { body: replyMsg } });
+        await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+        return new Response(JSON.stringify({ status: 'success', intent: 'CANCEL_ORDER' }), { status: 200, headers: corsHeaders });
+      }
+
       if (latitude && longitude) {
-        const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
-        const baseFee = 500;
-        const perKmFee = 150;
-        const calculatedDeliveryFee = Math.round(baseFee + (distance * perKmFee));
-        systemPromptInjection = `\n\n[SYSTEM NOTIFICATION]: The user just sent their location. Distance to hub is ${distance.toFixed(1)} km. The calculated delivery fee is ₦${calculatedDeliveryFee}. The AI must acknowledge the location, present the calculated delivery fee, and prompt the user to make payment (next_action="payment_prompt").`;
+        await sendWhatsAppMessage({
+          messaging_product: 'whatsapp',
+          to: whatsappNumber,
+          type: 'text',
+          text: { body: "Calculating your delivery fee and compiling your order... ⏳" }
+        });
+
+        // Check if there's a pending_confirmation order we can confirm immediately without the LLM
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id, subtotal, items')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_confirmation')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          const deliveryFee = 500;
+          const totalAmount = latestOrder.subtotal + deliveryFee + 500;
+          
+          await supabase.from('orders').update({
+            delivery_fee: deliveryFee,
+            service_fee: 500,
+            total_amount: totalAmount,
+            payment_method: 'bank_transfer'
+          }).eq('id', latestOrder.id);
+
+          const itemsList = latestOrder.items as any[] || [];
+          const itemsText = itemsList.length > 0 ? itemsList.map((i: any) => `${i.qty || 1}x ${i.name}`).join(', ') : 'Custom Order';
+          const replyMsg = `Here is your order breakdown:\n\n🍔 Items: *${itemsText}*\n💵 Subtotal: *₦${latestOrder.subtotal}*\n🚚 Delivery: *₦${deliveryFee}*\n⚙️ Service: *₦500*\n\n💰 *Total: ₦${totalAmount}*\n\nIs everything correct?`;
+          
+          await sendWhatsAppMessage({
+            messaging_product: 'whatsapp',
+            to: whatsappNumber,
+            type: 'interactive',
+            interactive: {
+              type: 'button',
+              body: { text: replyMsg },
+              action: {
+                buttons: [
+                  { type: 'reply', reply: { id: 'btn_confirm_order', title: 'Confirm Order' } },
+                  { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel' } }
+                ]
+              }
+            }
+          });
+          await supabase.from('whatsapp_messages').insert({ customer_id: customerId, direction: 'outbound', message_body: replyMsg });
+          return new Response(JSON.stringify({ status: 'success' }), { status: 200, headers: corsHeaders });
+        }
       }
 
       // 3. Get Chat History Context
@@ -233,7 +510,14 @@ serve(async (req) => {
           .join('\n');
       }
 
-      // 4. Call Groq API
+      // 4. Send Read Receipt
+      sendWhatsAppMessage({
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId
+      });
+
+      // 5. Call Groq API
       const groqApiKey = Deno.env.get('GROQ_API_KEY') || '';
       if (!groqApiKey) throw new Error('GROQ_API_KEY is not defined.');
 
@@ -247,17 +531,20 @@ JSON SCHEMA:
   "food_budget": "number or null",
   "delivery_address": "string or null",
   "reply_message": "string (the exact text to send the user)",
-  "next_action": "text" | "services_menu" | "request_location" | "payment_prompt"
+  "next_action": "text" | "services_menu" | "buy_food_menu" | "request_location" | "confirm_order" | "payment_prompt",
+  "update_name": "string or null"
 }
 
 CONVERSATION FLOW RULES:
 1. When a user first says hi or asks what you do, or when they select "Main Menu", set next_action="services_menu" and write a short welcoming reply_message.
-2. If they select "Errands & Food", ask them what specific errands or food they want.
-3. If they mention food, make sure to ask for their *budget for the food*.
-4. Once you have the list of items (and budget if food), you MUST ask for their location: set next_action="request_location" and tell them: "Please send your current location using the WhatsApp attachment (📍 Location) so we can calculate your delivery fee."
-5. If the system notification says they sent a location and gives a delivery fee, you must set next_action="payment_prompt", summarize their total order (budget + delivery fee), and tell them to pay to validate the order.
+2. If the user selects "Errands & Food" or says they want an errand, DO NOT send a menu. Instead, set next_action="text" and prompt them to type exactly what they need us to buy or do.
+3. CRITICAL RULE: If the user MANUALLY types out a request for FOOD (e.g., "I want rice", "buy chicken"), YOU MUST set next_action="buy_food_menu" and tell them to select a restaurant. HOWEVER, if the chat history shows the user already used the interactive menu (e.g., the Assistant said "You selected..."), DO NOT use this rule. Proceed to Rule 5 if they provided a location.
+4. If they want a NON-FOOD errand, ask for the list of items and their budget. Once you have those, you MUST ask for their location: set next_action="request_location" and tell them: "Please send your delivery address or use the WhatsApp Location attachment so we can finalize your order."
+5. If the user provides their location (either for a non-food errand OR after selecting a food item from the menu), the delivery fee is a FLAT ₦500. IMPORTANT: The delivery fee CANNOT be bigger than their food_budget (if they have one). If ₦500 is greater than their food_budget, reduce the delivery fee to match their food_budget exactly. Then, calculate the total (food_budget + delivery fee + 500 service fee), summarize the complete order breakdown to the user, ask them to confirm if everything is correct, and set next_action="confirm_order".
+6. If the user confirms the order is correct (e.g., they say "Yes" or click "Confirm Order"), set next_action="payment_prompt" and tell them to make a payment to validate the order placement.
+7. If the user tells you their name or asks you to change/update their name, extract it and set update_name="Their Name", and politely confirm the update in reply_message.
 
-TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBuy4Me*.${systemPromptInjection}`;
+TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBuy4Me*.`;
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -278,7 +565,11 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
       const parsedResult = JSON.parse(groqData.choices?.[0]?.message?.content || '{}');
       console.log('Parsed LLM Result:', parsedResult);
 
-      const { intent, items, food_budget, reply_message, next_action } = parsedResult;
+      const { intent, items, food_budget, reply_message, next_action, update_name } = parsedResult;
+
+      if (update_name) {
+        await supabase.from('customers').update({ full_name: update_name }).eq('id', customerId);
+      }
 
       // 5. Construct final WhatsApp Message Payload based on next_action
       let waPayload: any = {
@@ -303,21 +594,51 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
             ]
           }
         };
-      } else if (next_action === 'payment_prompt') {
-        // Create the order in DB if we have items
-        if (items && items.length > 0) {
-          let deliveryFee = 0;
-          if (latitude && longitude) {
-            const distance = calculateDistance(BASE_LAT, BASE_LNG, latitude, longitude);
-            deliveryFee = Math.round(500 + (distance * 150));
-          } else {
-            deliveryFee = 1500; // fallback
-          }
-          const totalAmount = (food_budget || 0) + deliveryFee + 500; // 500 service fee
+      } else if (next_action === 'buy_food_menu') {
+        const { data: vendors } = await supabase.from('vendors').select('id, name, address').eq('category', 'restaurant').eq('is_active', true).limit(10);
+        if (!vendors || vendors.length === 0) {
+           waPayload.type = 'text';
+           waPayload.text = { body: 'Sorry, no food vendors are available at the moment.' };
+        } else {
+           const rows = vendors.map((v) => ({ id: `vendor_${v.id}`, title: v.name.substring(0, 24), description: (v.address || '').substring(0, 72) }));
+           waPayload.type = 'interactive';
+           waPayload.interactive = {
+             type: 'list',
+             body: { text: reply_message || 'Please select a restaurant to order your food from!' },
+             action: {
+               button: 'View Vendors',
+               sections: [{ title: 'Restaurants', rows: rows }]
+             }
+           };
+        }
+      } else if (next_action === 'confirm_order') {
+        let deliveryFee = 500;
+        if (food_budget && deliveryFee > food_budget) {
+          deliveryFee = food_budget;
+        }
 
+        const { data: latestOrder } = await supabase
+          .from('orders')
+          .select('id, subtotal')
+          .eq('customer_id', customerId)
+          .eq('status', 'pending_confirmation')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestOrder) {
+          const totalAmount = latestOrder.subtotal + deliveryFee + 500;
+          await supabase.from('orders').update({
+            delivery_fee: deliveryFee,
+            service_fee: 500,
+            total_amount: totalAmount,
+            payment_method: 'bank_transfer'
+          }).eq('id', latestOrder.id);
+        } else if (items && items.length > 0) {
+          const totalAmount = (food_budget || 0) + deliveryFee + 500;
           await supabase.from('orders').insert({
             customer_id: customerId,
-            status: 'pending_payment',
+            status: 'pending_confirmation',
             items: items,
             raw_text: messageBody,
             subtotal: food_budget || 0,
@@ -331,10 +652,23 @@ TONE: Fun, easy, friendly. Use 🔴 and 🟡 emojis. Bold the brand name *EasyBu
         waPayload.type = 'interactive';
         waPayload.interactive = {
           type: 'button',
-          body: { text: reply_message || 'Please make a payment to validate your order.' },
+          body: { text: reply_message || 'Please confirm your order details above.' },
           action: {
             buttons: [
-              { type: 'reply', reply: { id: 'btn_paid', title: 'I Have Paid' } },
+              { type: 'reply', reply: { id: 'btn_confirm_order', title: 'Confirm Order' } },
+              { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel' } }
+            ]
+          }
+        };
+      } else if (next_action === 'payment_prompt') {
+        waPayload.type = 'interactive';
+        waPayload.interactive = {
+          type: 'button',
+          body: { text: reply_message || 'Please choose your payment method to validate your order.' },
+          action: {
+            buttons: [
+              { type: 'reply', reply: { id: 'btn_bank_transfer', title: 'Bank Transfer' } },
+              { type: 'reply', reply: { id: 'btn_pay_on_delivery', title: 'Pay on Delivery' } },
               { type: 'reply', reply: { id: 'btn_cancel', title: 'Cancel Order' } }
             ]
           }
